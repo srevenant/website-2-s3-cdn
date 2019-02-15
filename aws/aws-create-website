@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import argparse
+import dictlib
+import time
+
+import boto3
+
+def log(msg, *args):
+    print(str(int(time.time())) + " " + msg.format(*args))
+
+class MyAws(object):
+    session = None
+    _resource = None
+    _client = None
+
+    def __init__(self, profile=None, domain=None, region=None):
+        if None in (profile, domain, region):
+            raise Exception("Something isn't coming in right")
+
+        self.domain = domain
+        self.region = region
+        self.sess_args = dict(profile_name=profile)
+        self._sessions = dict()
+        self._resource = dictlib.Obj()
+        self._client = dictlib.Obj()
+
+    def session(self, region=None):
+        if not region:
+            region = self.region
+        if not self._sessions.get(region):
+            self._sessions[region] = boto3.session.Session(region_name=region, **self.sess_args)
+        return self._sessions[region]
+
+    def client(self, rtype, region=None):
+        if not self._client.get(rtype):
+            self._client[rtype] = self.session(region=region).client(rtype)
+        return self._client[rtype]
+
+    def resource(self, rtype, region=None):
+        if not self._resource.get(rtype):
+            self._resource[rtype] = self.session(region=region).resource(rtype)
+        return self._resource[rtype]
+
+    def get_buckets(self):
+        s3 = self.resource('s3')
+        out = dict()
+        for bucket in s3.buckets.all():
+            out[bucket.name] = bucket
+        return out
+
+    def fmt_buckets(self):
+        out = ["Current Buckets:"]
+        for bucket_name in self.get_buckets():
+            out += ["  " + bucket_name]
+        return "\n".join(out)
+
+    def create_bucket(self, name, cfg={}):
+        buckets = self.get_buckets()
+        if buckets.get(name):
+            return name
+
+        log("bucket {}", self.domain)
+        cfg = dictlib.union(dict(
+            Bucket=name,
+            ACL='public-read',
+            CreateBucketConfiguration=dict(
+              LocationConstraint=self.region
+            )
+        ), cfg)
+        res = self.resource('s3').create_bucket(**cfg)
+        return res.name
+
+    def get_account_id(self):
+        sts = self.client('sts')
+        return sts.get_caller_identity().get('Account')
+
+    def create_iam_policy(self, name, policy):
+        iam = self.client('iam')
+        try:
+            iam.create_policy(
+                PolicyName=name,
+                PolicyDocument=json.dumps(policy))
+            log("iam admin policy")
+        except iam.exceptions.EntityAlreadyExistsException:
+            log("<skip> iam admin policy already exists")
+            pass
+
+    def create_s3_policy(self, name, policy):
+        log("s3 bucket policy")
+        self.client('s3').put_bucket_policy(Bucket=name, Policy=json.dumps(policy))
+
+    def acm_ssl_cert(self, name, region=None):
+        acm = self.client('acm', region=region)
+        cert_arn = self.acm_get_cert_arn(name, region=region)
+        if cert_arn:
+            return self.acm_wait_for_cert(cert_arn, region=region)
+
+        log("{} requesting certificate...", name)
+        res = acm.request_certificate(
+                DomainName=name,
+                ValidationMethod='DNS',
+                SubjectAlternativeNames=[
+                    'www.' + name,
+                ],
+                IdempotencyToken='samerequest', # only lasts 1 hour
+                DomainValidationOptions=[
+                    {
+                        'DomainName': name,
+                        'ValidationDomain': name,
+                    },
+                ],
+                Options={
+                    'CertificateTransparencyLoggingPreference': 'ENABLED',
+                }
+        )
+        return self.acm_wait_for_cert(res.get('CertificateArn'), region=region)
+
+    def acm_wait_for_cert(self, arn, region=None):
+        acm = self.client('acm', region=region)
+        valid = False
+        while not valid:
+            cert = acm.describe_certificate(CertificateArn=arn)
+            status = cert['Certificate']['Status']
+            if status == 'ISSUED':
+                return arn
+            log("certificate status={}...", status)
+            time.sleep(30)
+        return arn
+
+    def acm_get_cert_arn(self, name, region=None):
+        acm = self.client('acm', region=region)
+        # NOTE: this doesn't pay attention to NextToken and pagination
+        res = acm.list_certificates(CertificateStatuses=['PENDING_VALIDATION', 'ISSUED'])
+        for cert in res['CertificateSummaryList']:
+            if cert['DomainName'] == name:
+                return cert['CertificateArn']
+        return None
+
+    def s3_bucket_website(self, name):
+        s3 = self.resource('s3')
+        website = s3.BucketWebsite(name)
+        log("configuring {} as website", name)
+        obj = website.put(
+          WebsiteConfiguration={
+            'ErrorDocument': {
+                'Key': 'error.html'
+            },
+            'IndexDocument': {
+                'Suffix': 'index.html'
+            },
+          }
+        )
+
+        # isn't this somewhere on the object?
+        log("http://{}.s3-website-{}.amazonaws.com/", name, self.region)
+
+    def create_cdn(self, web_bucket, log_bucket, cert_arn):
+        cf = self.client('cloudfront')
+        cf.create_distribution(DistributionConfig=dict(
+            CallerReference='sameone',
+            Aliases = dict(Quantity=1, Items=[self.domain]),
+            DefaultRootObject='index.html',
+            Comment=self.domain + " cdn",
+            Enabled=True,
+            Origins = dict(
+                Quantity = 1,
+                Items = [dict(
+                    Id = '1',
+                    DomainName=web_bucket + '.s3.amazonaws.com',
+                    S3OriginConfig = dict(OriginAccessIdentity = '')
+                )]),
+            DefaultCacheBehavior = dict(
+                TargetOriginId = '1',
+                ViewerProtocolPolicy= 'redirect-to-https',
+                TrustedSigners = dict(Quantity=0, Enabled=False),
+                ForwardedValues=dict(
+                    Cookies = {'Forward':'all'},
+                    Headers = dict(Quantity=0),
+                    QueryString=False,
+                    QueryStringCacheKeys= dict(Quantity=0),
+                    ),
+                MinTTL=1000),
+            Logging=dict(
+                Enabled=True,
+                Bucket=log_bucket + ".s3.amazonaws.com",
+                IncludeCookies=False,
+                Prefix='cdn'
+            ),
+            ViewerCertificate=dict(
+                CloudFrontDefaultCertificate=False,
+                ACMCertificateArn=cert_arn,
+                CertificateSource='acm',
+                SSLSupportMethod='sni-only',
+                MinimumProtocolVersion='TLSv1.2_2018'
+            ),
+            PriceClass='PriceClass_100'
+        ))
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("profile")
+    parser.add_argument("domain")
+    args = parser.parse_args()
+
+    aws = MyAws(domain=args.domain, profile=args.profile, region='us-west-2')
+    domain = args.domain
+    #acctid = aws.get_account_id()
+
+    # create log bucket, not public
+    # create domain bucket, as public
+    # lame - AWS requires certs for cloudfront to be in us-east-1
+    cert_arn = aws.acm_ssl_cert(domain, region='us-east-1')
+    log("ssl cert={}".format(cert_arn))
+    # setup lifecycle
+    log_bucket = aws.create_bucket(domain + "-logs", cfg=dict(ACL='private'))
+    web_bucket = aws.create_bucket(domain)
+    aws.s3_bucket_website(domain)
+    aws.create_iam_policy("s3-admin-" + domain, {
+        "Statement": [
+            {
+                "Action": [
+                    "s3:ListAllMyBuckets"
+                ],
+                "Effect": "Allow",
+                "Resource": [
+                    "arn:aws:s3:::*"
+                ]
+            },
+            {
+                "Action": [
+                    "s3:ListBucket",
+                    "s3:PutObject",
+                    "s3:PutObjectAcl"
+                ],
+                "Effect": "Allow",
+                "Resource": [
+                    "arn:aws:s3:::" + domain,
+                    "arn:aws:s3:::" + domain + "/*"
+                ]
+            }
+        ],
+        "Version": "2012-10-17"
+    })
+
+    aws.create_s3_policy(domain, {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "PublicReadGetObject",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::" + domain + "/*"
+            }
+        ]
+    })
+
+    # s3push automation policy iam account?
+
+    # create cert first?
+    aws.create_cdn(web_bucket, log_bucket, cert_arn)
+
+    # s3cmd sync
+
+if __name__ == '__main__':
+    main()

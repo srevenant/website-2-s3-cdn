@@ -1,0 +1,13 @@
+version: '3.3'
+services:
+  s3push:
+    build:
+      context: ../..
+      dockerfile: docker/deploy/Dockerfile
+    volumes:
+      - ../../site/:/site:ro
+    environment:
+      - AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+      - WEB_DOMAIN_BUCKET=$WEB_DOMAIN_BUCKET
+    command: /s3push.sh

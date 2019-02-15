@@ -1,0 +1,26 @@
+{
+    "Statement": [
+        {
+            "Action": [
+                "s3:ListAllMyBuckets"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::*"
+            ]
+        },
+        {
+            "Action": [
+                "s3:ListBucket",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::DOMAINNAME",
+                "arn:aws:s3:::DOMAINNAME/*"
+            ]
+        }
+    ],
+    "Version": "2012-10-17"
+}
