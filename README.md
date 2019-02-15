@@ -9,7 +9,7 @@ your static site ends up being.
 
 ## config first
 
-Run script `aws/aws-create-website` -- this creates buckets, ssl cert, CDN and the works.
+Run script `aws/create-website` -- this creates buckets, ssl cert, CDN and the works.
 First argument is the profile to use (~/.aws/credentials) and the second is the domain
 for the website.
 

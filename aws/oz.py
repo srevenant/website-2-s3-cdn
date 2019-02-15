@@ -6,13 +6,21 @@ import json
 import argparse
 import dictlib
 import time
-
 import boto3
+import datetime
+
+
+def json_serialize(obj):
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
 
 def log(msg, *args):
     print(str(int(time.time())) + " " + msg.format(*args))
 
-class MyAws(object):
+def paginate(client, method, *args, **kwargs):
+    return client.get_paginator(method).paginate(*args, **kwargs)
+
+class StaticWebsite(object):
     session = None
     _resource = None
     _client = None
@@ -197,74 +205,24 @@ class MyAws(object):
                 SSLSupportMethod='sni-only',
                 MinimumProtocolVersion='TLSv1.2_2018'
             ),
-            PriceClass='PriceClass_100'
+            PriceClass='PriceClass_100',
+            CustomErrorResponses=dict(
+                Items=[dict(
+                        ErrorCachingMinTTL=300,
+                        ErrorCode=404,
+                        ResponseCode=404,
+                        ResponsePagePath="/error.html"
+                    )],
+                Quantity= 1
+            )
         ))
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("profile")
-    parser.add_argument("domain")
-    args = parser.parse_args()
-
-    aws = MyAws(domain=args.domain, profile=args.profile, region='us-west-2')
-    domain = args.domain
-    #acctid = aws.get_account_id()
-
-    # create log bucket, not public
-    # create domain bucket, as public
-    # lame - AWS requires certs for cloudfront to be in us-east-1
-    cert_arn = aws.acm_ssl_cert(domain, region='us-east-1')
-    log("ssl cert={}".format(cert_arn))
-    # setup lifecycle
-    log_bucket = aws.create_bucket(domain + "-logs", cfg=dict(ACL='private'))
-    web_bucket = aws.create_bucket(domain)
-    aws.s3_bucket_website(domain)
-    aws.create_iam_policy("s3-admin-" + domain, {
-        "Statement": [
-            {
-                "Action": [
-                    "s3:ListAllMyBuckets"
-                ],
-                "Effect": "Allow",
-                "Resource": [
-                    "arn:aws:s3:::*"
-                ]
-            },
-            {
-                "Action": [
-                    "s3:ListBucket",
-                    "s3:PutObject",
-                    "s3:PutObjectAcl"
-                ],
-                "Effect": "Allow",
-                "Resource": [
-                    "arn:aws:s3:::" + domain,
-                    "arn:aws:s3:::" + domain + "/*"
-                ]
-            }
-        ],
-        "Version": "2012-10-17"
-    })
-
-    aws.create_s3_policy(domain, {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Sid": "PublicReadGetObject",
-                "Effect": "Allow",
-                "Principal": "*",
-                "Action": "s3:GetObject",
-                "Resource": "arn:aws:s3:::" + domain + "/*"
-            }
-        ]
-    })
-
-    # s3push automation policy iam account?
-
-    # create cert first?
-    aws.create_cdn(web_bucket, log_bucket, cert_arn)
-
-    # s3cmd sync
-
-if __name__ == '__main__':
-    main()
+    def report(self, args):
+        cf = self.client('cloudfront')
+        if not args.distribution:
+            for page in paginate(cf, 'list_distributions'):
+                for dist in dictlib.dig(page, 'DistributionList.Items'):
+                    if args.raw:
+                        print(json.dumps(dist, indent=2, sort_keys=True, default=json_serialize))
+                    else:
+                        print("{Id} {ARN} {DomainName} {Comment}".format(**dist))

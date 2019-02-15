@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import json
+import argparse
+import dictlib
+import time
+import oz
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("profile")
+    parser.add_argument("domain")
+    parser.add_argument("--raw", action='store_true')
+    parser.add_argument("distribution", nargs="*")
+    args = parser.parse_args()
+
+    oz.StaticWebsite(domain=args.domain, profile=args.profile, region='us-west-2').report(args)
+
+if __name__ == '__main__':
+    main()
