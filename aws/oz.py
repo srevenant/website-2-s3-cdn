@@ -178,7 +178,7 @@ class StaticWebsite(object):
                 Quantity = 1,
                 Items = [dict(
                     Id = '1',
-                    DomainName=web_bucket + '.s3.amazonaws.com',
+                    DomainName=web_bucket + '.s3-website-' + self.region + '.amazonaws.com',
                     S3OriginConfig = dict(OriginAccessIdentity = '')
                 )]),
             DefaultCacheBehavior = dict(
