@@ -167,9 +167,11 @@ class StaticWebsite(object):
         log("http://{}.s3-website-{}.amazonaws.com/", name, self.region)
 
     def create_cdn(self, web_bucket, log_bucket, cert_arn):
+        origin = web_bucket + '.s3-website-' + self.region + '.amazonaws.com'
+        log("using origin = {}", origin)
         cf = self.client('cloudfront')
         cf.create_distribution(DistributionConfig=dict(
-            CallerReference='sameone',
+            CallerReference=web_bucket + '.sameone',
             Aliases = dict(Quantity=1, Items=[self.domain]),
             DefaultRootObject='index.html',
             Comment=self.domain + " cdn",
@@ -178,8 +180,11 @@ class StaticWebsite(object):
                 Quantity = 1,
                 Items = [dict(
                     Id = '1',
-                    DomainName=web_bucket + '.s3-website-' + self.region + '.amazonaws.com',
+#                    DomainName = origin,
+# this should be working via S3, but is not, so just say custom
+                    DomainName = web_bucket + ".s3.amazonaws.com",
                     S3OriginConfig = dict(OriginAccessIdentity = '')
+#                    CustomOriginConfig = dict() # OriginAccessIdentity = '')
                 )]),
             DefaultCacheBehavior = dict(
                 TargetOriginId = '1',
@@ -210,10 +215,10 @@ class StaticWebsite(object):
                 Items=[dict(
                         ErrorCachingMinTTL=300,
                         ErrorCode=404,
-                        ResponseCode=404,
+                        ResponseCode="404",
                         ResponsePagePath="/error.html"
                     )],
-                Quantity= 1
+                Quantity=1
             )
         ))
 
